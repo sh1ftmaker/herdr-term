@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>herdr files</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/viewport.js"></script>
+<style>
+  main { padding:16px 18px 40px; max-width:1100px; margin:0 auto; }
+
+  .crumbs { display:flex; flex-wrap:wrap; align-items:center; gap:2px;
+            margin-bottom:12px; font-size:13px; }
+  .crumbs a { color:var(--accent); text-decoration:none; padding:3px 5px; border-radius:5px; }
+  .crumbs a:hover { background:#1e2330; }
+  .crumbs span.sep { color:var(--dim); }
+  .crumbs .here { color:var(--fg); padding:3px 5px; }
+
+  ul.entries { list-style:none; margin:0; padding:0;
+               border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  ul.entries li { display:flex; align-items:center; gap:12px; padding:10px 14px;
+                  border-bottom:1px solid var(--line); background:var(--panel); }
+  ul.entries li:last-child { border-bottom:0; }
+  ul.entries li:hover { background:#1b2030; }
+  .glyph { width:20px; flex:none; text-align:center; font-size:15px; opacity:.85; }
+  .ename { flex:1; min-width:0; cursor:pointer; overflow:hidden;
+           text-overflow:ellipsis; white-space:nowrap; }
+  .ename.dir { font-weight:600; }
+  .esize { color:var(--dim); font-size:12px; font-family:ui-monospace, monospace;
+           white-space:nowrap; }
+  .edl { color:var(--dim); text-decoration:none; font-size:15px; padding:2px 6px;
+         border-radius:5px; }
+  .edl:hover { background:#222836; color:var(--fg); }
+  .broken { color:var(--blocked); font-size:11px; }
+
+  /* Viewer sits over the listing so the browsing position survives a peek. */
+  #viewer { display:none; position:fixed; inset:0; z-index:40; background:rgba(9,11,15,.93);
+            height:100dvh; height:var(--vh, 100dvh);
+            padding-bottom:env(safe-area-inset-bottom);
+            flex-direction:column; }
+  #viewer.open { display:flex; }
+  #vhead { display:flex; align-items:center; gap:10px; padding:11px 14px;
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  #vname { flex:1; min-width:0; font-weight:600; overflow:hidden;
+           text-overflow:ellipsis; white-space:nowrap; }
+  #vbody { flex:1; overflow:auto; padding:14px; }
+  #vbody pre { margin:0; font:12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+               white-space:pre; color:var(--fg); }
+  #vbody img { display:block; margin:0 auto; max-width:100%; height:auto;
+               background:#000; border-radius:6px; }
+  .empty { color:var(--dim); text-align:center; padding:40px 20px;
+           border:1px dashed var(--line); border-radius:10px; }
+  @media (max-width:600px) {
+    main { padding:12px; }
+    .esize { display:none; }
+  }
+</style>
+</head>
+<body>
+  <header class="app">
+    <h1>Herdr</h1>
+    <nav class="tabs">
+      <a href="/">Sessions</a>
+      <a href="/files.html" aria-current="page">Files</a>
+      <a href="/desktop.html">Desktop</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="state" id="state"></span>
+  </header>
+
+  <main>
+    <div class="banner err" id="err"></div>
+    <div class="crumbs" id="crumbs"></div>
+    <ul class="entries" id="list"></ul>
+  </main>
+
+  <div id="viewer">
+    <div id="vhead">
+      <span id="vname"></span>
+      <a class="btn" id="vdl" download>Download</a>
+      <button id="vclose">Close</button>
+    </div>
+    <div id="vbody"></div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+
+const GLYPH = { dir: '📁', text: '📄', image: '🖼️', binary: '⬛' };
+
+function fmtSize(n) {
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+const showErr = m => {
+  $('err').textContent = m || '';
+  $('err').style.display = m ? 'block' : 'none';
+};
+
+const raw = (path, download) =>
+  `/api/fs/raw?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`;
+
+async function api(url) {
+  const res = await fetch(url);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+
+let current = '';
+
+async function openDir(path = '') {
+  try {
+    const data = await api(`/api/fs/list?path=${encodeURIComponent(path)}`);
+    current = data.path;
+    // Keep the URL in step so a directory can be linked and reloaded.
+    const url = data.path ? `?path=${encodeURIComponent(data.path)}` : location.pathname;
+    history.replaceState(null, '', url);
+    showErr('');
+    renderCrumbs(data);
+    renderList(data);
+  } catch (err) {
+    showErr(err.message);
+  }
+}
+
+function renderCrumbs(data) {
+  const parts = data.path ? data.path.split('/') : [];
+  const bits = [`<a href="#" data-go="">${esc(data.root)}</a>`];
+  let acc = '';
+  parts.forEach((part, i) => {
+    acc = acc ? `${acc}/${part}` : part;
+    bits.push('<span class="sep">/</span>');
+    bits.push(i === parts.length - 1
+      ? `<span class="here">${esc(part)}</span>`
+      : `<a href="#" data-go="${esc(acc)}">${esc(part)}</a>`);
+  });
+  $('crumbs').innerHTML = bits.join('');
+  for (const a of $('crumbs').querySelectorAll('a[data-go]')) {
+    a.onclick = e => { e.preventDefault(); openDir(a.dataset.go); };
+  }
+  $('state').textContent = `${data.entries.length} item${data.entries.length === 1 ? '' : 's'}`;
+}
+
+function renderList(data) {
+  const rows = [];
+  if (data.path) {
+    rows.push(`<li><span class="glyph">↩</span>
+      <span class="ename dir" data-dir="${esc(data.parent ?? '')}">..</span></li>`);
+  }
+  for (const e of data.entries) {
+    const full = data.path ? `${data.path}/${e.name}` : e.name;
+    const action = e.kind === 'dir'
+      ? `data-dir="${esc(full)}"`
+      : `data-view="${esc(full)}" data-kind="${e.kind}"`;
+    rows.push(`<li>
+      <span class="glyph">${GLYPH[e.kind] ?? GLYPH.binary}</span>
+      <span class="ename ${e.kind === 'dir' ? 'dir' : ''}" ${action}>${esc(e.name)}${
+        e.broken ? ' <span class="broken">(broken link)</span>' : ''}</span>
+      <span class="esize">${e.kind === 'dir' ? '' : fmtSize(e.size)}</span>
+      ${e.kind === 'dir' || e.broken ? '' :
+        `<a class="edl" title="Download" href="${raw(full, true)}" download>⤓</a>`}
+    </li>`);
+  }
+  $('list').innerHTML = rows.length ? rows.join('') : '<li class="empty">Empty directory</li>';
+
+  for (const el of $('list').querySelectorAll('[data-dir]')) el.onclick = () => openDir(el.dataset.dir);
+  for (const el of $('list').querySelectorAll('[data-view]')) {
+    el.onclick = () => view(el.dataset.view, el.dataset.kind);
+  }
+}
+
+async function view(path, kind) {
+  const name = path.split('/').pop();
+  $('vname').textContent = name;
+  $('vdl').href = raw(path, true);
+  $('vdl').setAttribute('download', name);
+  $('viewer').classList.add('open');
+
+  if (kind === 'image') {
+    $('vbody').innerHTML = `<img src="${raw(path)}" alt="${esc(name)}">`;
+    return;
+  }
+  if (kind !== 'text') {
+    $('vbody').innerHTML = `<p class="dim">Not a previewable file — use Download.</p>`;
+    return;
+  }
+  $('vbody').innerHTML = '<p class="dim">Loading…</p>';
+  try {
+    const data = await api(`/api/fs/text?path=${encodeURIComponent(path)}`);
+    $('vbody').innerHTML = `${data.truncated
+      ? `<p class="dim">Showing the first 512 KB of ${fmtSize(data.size)}.</p>` : ''}
+      <pre>${esc(data.text)}</pre>`;
+  } catch (err) {
+    $('vbody').innerHTML = `<p class="dim">${esc(err.message)}</p>`;
+  }
+}
+
+const closeViewer = () => {
+  $('viewer').classList.remove('open');
+  $('vbody').innerHTML = '';
+};
+$('vclose').onclick = closeViewer;
+addEventListener('keydown', e => { if (e.key === 'Escape') closeViewer(); });
+
+openDir(new URLSearchParams(location.search).get('path') ?? '');
+</script>
+</body>
+</html>

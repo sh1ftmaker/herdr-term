@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>herdr desktop</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/viewport.js"></script>
+<style>
+  /* min-height:0 defeats app.css's min-height:100dvh, which would otherwise
+     override this height and keep the page full-size under the keyboard. */
+  body { height:100dvh; height:var(--vh, 100dvh); min-height:0;
+         display:flex; flex-direction:column; overflow:hidden; }
+  main { flex:1; display:flex; flex-direction:column; min-height:0; }
+
+  .modebar { display:flex; gap:6px; align-items:center; padding:8px 14px;
+             border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; }
+  .modebar .grow { flex:1; }
+
+  #stage { flex:1; min-height:0; position:relative; background:#07080b; }
+  #stage iframe { width:100%; height:100%; border:0; display:block; }
+  #stage img { width:100%; height:100%; object-fit:contain; display:block;
+               touch-action:none; -webkit-user-select:none; user-select:none;
+               -webkit-touch-callout:none; }
+  #stage.touch img { cursor:crosshair; }
+  /* A short ping where a tap landed: the desktop being driven is usually not
+     in front of you, so the tap needs to acknowledge itself. */
+  #ping { position:absolute; width:26px; height:26px; margin:-13px 0 0 -13px;
+          border:2px solid var(--accent); border-radius:50%; pointer-events:none;
+          opacity:0; transition:opacity .35s ease-out, transform .35s ease-out; }
+  #ping.on { opacity:1; transform:scale(.45); transition:none; }
+  #stagemsg { position:absolute; inset:0; display:flex; align-items:center;
+              justify-content:center; padding:24px; text-align:center; }
+  #stagemsg .inner { max-width:560px; }
+  #stagemsg h2 { margin:0 0 8px; font-size:15px; }
+  #stagemsg p { margin:6px 0; color:var(--dim); font-size:13px; line-height:1.55; }
+  #stagemsg code { font-family:ui-monospace, monospace; background:#0b1220;
+                   border:1px solid #24314a; border-radius:5px; padding:2px 7px;
+                   display:inline-block; margin-top:4px; overflow-wrap:anywhere; }
+
+  /* Shortcut pad: the point of this page on a phone, so it stays reachable. */
+  #pad { border-top:1px solid var(--line); background:var(--panel); flex:none; }
+  /* When the pad is collapsed nothing else pads the bottom edge. */
+  #pad.closed { padding-bottom:max(0px, env(safe-area-inset-bottom)); }
+  #padhead { display:flex; gap:6px; align-items:center; padding:8px 12px;
+             overflow-x:auto; scrollbar-width:none; }
+  #padhead::-webkit-scrollbar { display:none; }
+  #padhead button.group { font-size:12px; padding:5px 11px; white-space:nowrap; }
+  #padhead button.group[aria-pressed="true"] { background:var(--accent);
+                                               border-color:var(--accent); color:#fff; }
+  #padkeys { display:flex; flex-wrap:wrap; gap:6px; padding:0 12px 10px;
+             max-height:33dvh; overflow-y:auto; }
+  #padkeys button { font-size:12.5px; padding:9px 12px; }
+  #padkeys button small { display:block; font-size:10px; color:var(--dim);
+                          margin-top:2px; letter-spacing:.03em; }
+  #padkeys button[aria-pressed="true"] small { color:#dbe7ff; }
+  #padkeys button.hot { border-color:var(--accent); }
+
+  #typebar { display:flex; gap:6px; padding:0 12px 10px;
+             padding-bottom:max(10px, env(safe-area-inset-bottom)); }
+  #typebar input { flex:1; min-width:0; font-family:ui-monospace, monospace; }
+  #collapse { margin-left:auto; }
+  #pad.closed #padkeys, #pad.closed #typebar { display:none; }
+
+  @media (max-width:600px) {
+    .modebar { padding:7px 10px; }
+    #padkeys { max-height:38dvh; }
+  }
+</style>
+</head>
+<body>
+  <header class="app">
+    <h1>Herdr</h1>
+    <nav class="tabs">
+      <a href="/">Sessions</a>
+      <a href="/files.html">Files</a>
+      <a href="/desktop.html" aria-current="page">Desktop</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="state" id="state">checking…</span>
+  </header>
+
+  <main>
+    <div class="modebar">
+      <button id="m-stream" class="primary">Stream</button>
+      <button id="m-screen">Screen</button>
+      <span class="grow"></span>
+      <button id="refresh" title="Grab a new frame">↻</button>
+      <button id="live" aria-pressed="true">Live</button>
+    </div>
+
+    <div id="stage">
+      <div id="stagemsg"><div class="inner"><p class="dim">Loading…</p></div></div>
+    </div>
+
+    <div id="pad">
+      <div id="padhead">
+        <button id="collapse" title="Show/hide the shortcut pad">Shortcuts ▾</button>
+      </div>
+      <div id="padkeys"></div>
+      <form id="typebar">
+        <input id="typetext" placeholder="Type into the focused window…" autocomplete="off"
+               autocapitalize="off" autocorrect="off" spellcheck="false">
+        <button type="submit" class="primary">Send</button>
+      </form>
+    </div>
+  </main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+
+async function api(url, body) {
+  const res = await fetch(url, body ? {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  } : undefined);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function setState(text, bad = false) {
+  $('state').textContent = text;
+  $('state').className = bad ? 'state bad' : 'state';
+}
+
+// --- shortcut pad ---------------------------------------------------------
+// Keys that go to whatever has focus, rather than to Hyprland.
+const KEYPAD = [
+  { label: 'Esc', key: 'Escape' }, { label: 'Tab', key: 'Tab' },
+  { label: 'Enter', key: 'Return' }, { label: '⌫', key: 'BackSpace' },
+  { label: '↑', key: 'Up' }, { label: '↓', key: 'Down' },
+  { label: '←', key: 'Left' }, { label: '→', key: 'Right' },
+  { label: 'Ctrl-C', key: 'c', mods: ['ctrl'] },
+  { label: 'Ctrl-V', key: 'v', mods: ['ctrl'] },
+];
+
+// Mouse buttons act wherever the cursor already is, so they pair with a tap on
+// the Screen view (which moves the cursor) and work on their own during a
+// stream. Hyprland has no click dispatcher; these go through a virtual input
+// device on the host.
+const MOUSEPAD = [
+  { label: 'Click', body: { click: true, button: 'left' } },
+  { label: 'Double', body: { click: true, button: 'left', count: 2 } },
+  { label: 'Right', body: { click: true, button: 'right' } },
+  { label: 'Middle', body: { click: true, button: 'middle' } },
+  { label: 'Scroll ↑', body: { scroll: 3 } },
+  { label: 'Scroll ↓', body: { scroll: -3 } },
+];
+
+let groups = {}, activeGroup = null;
+
+async function loadShortcuts() {
+  const { shortcuts } = await api('/api/desktop/shortcuts');
+  groups = { Keys: null, Mouse: null };
+  for (const s of shortcuts) (groups[s.group] ??= []).push(s);
+
+  const head = $('padhead');
+  // Hold the collapse button before clearing: innerHTML='' detaches it, and a
+  // detached node is not findable by id, so re-appending it has to go through
+  // this reference rather than a second lookup. Its click handler survives the
+  // round trip because it is the same node.
+  const collapse = $('collapse');
+  head.innerHTML = '';
+  for (const name of Object.keys(groups)) {
+    const b = document.createElement('button');
+    b.className = 'group';
+    b.textContent = name;
+    b.onclick = () => selectGroup(name);
+    head.appendChild(b);
+  }
+  head.appendChild(collapse);
+  selectGroup('Menus' in groups ? 'Menus' : Object.keys(groups)[0]);
+}
+
+function selectGroup(name) {
+  activeGroup = name;
+  for (const b of $('padhead').querySelectorAll('button.group')) {
+    b.setAttribute('aria-pressed', String(b.textContent === name));
+  }
+  const keys = $('padkeys');
+  keys.innerHTML = '';
+
+  if (name === 'Keys') {
+    for (const k of KEYPAD) {
+      const b = document.createElement('button');
+      b.className = 'hot';
+      b.textContent = k.label;
+      b.onclick = () => act(() => api('/api/desktop/key', { key: k.key, mods: k.mods ?? [] }), b);
+      keys.appendChild(b);
+    }
+    return;
+  }
+  if (name === 'Mouse') {
+    for (const m of MOUSEPAD) {
+      const b = document.createElement('button');
+      b.className = 'hot';
+      b.textContent = m.label;
+      b.onclick = () => act(() => api('/api/desktop/pointer', m.body), b);
+      keys.appendChild(b);
+    }
+    const note = document.createElement('span');
+    note.className = 'dim';
+    note.style.cssText = 'font-size:11.5px; align-self:center; padding-left:2px';
+    note.textContent = 'In Screen mode, tap the picture to move the pointer there and click. Hold for a right-click.';
+    keys.appendChild(note);
+    return;
+  }
+  for (const s of groups[name]) {
+    const b = document.createElement('button');
+    b.innerHTML = `${esc(s.label)}${s.keys ? `<small>${esc(s.keys)}</small>` : ''}`;
+    b.onclick = () => act(() => api('/api/desktop/dispatch', { id: s.id }), b);
+    keys.appendChild(b);
+  }
+}
+
+// Every button flashes its own result: on a phone the desktop it drives is
+// often out of sight, so silence would be indistinguishable from failure.
+async function act(fn, btn) {
+  btn.disabled = true;
+  try {
+    await fn();
+    setState('sent');
+    if (mode === 'screen') setTimeout(grab, 350);
+  } catch (err) {
+    setState(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('typebar').onsubmit = async e => {
+  e.preventDefault();
+  const input = $('typetext');
+  const text = input.value;
+  if (!text) return;
+  try {
+    await api('/api/desktop/type', { text });
+    input.value = '';
+    setState(`typed ${text.length} char${text.length === 1 ? '' : 's'}`);
+    if (mode === 'screen') setTimeout(grab, 350);
+  } catch (err) {
+    setState(err.message, true);
+  }
+};
+
+$('collapse').onclick = () => {
+  const closed = $('pad').classList.toggle('closed');
+  $('collapse').textContent = closed ? 'Shortcuts ▴' : 'Shortcuts ▾';
+};
+
+// --- stage: moonlight stream, or a polled screen grab ---------------------
+let mode = 'stream', live = true, timer = null, status = null;
+
+function stageMessage(html) {
+  $('stage').classList.remove('touch');
+  $('stage').innerHTML = `<div id="stagemsg"><div class="inner">${html}</div></div>`;
+}
+
+function setMode(next) {
+  mode = next;
+  $('m-stream').className = next === 'stream' ? 'primary' : '';
+  $('m-screen').className = next === 'screen' ? 'primary' : '';
+  clearTimeout(timer);
+  render();
+}
+
+function render() {
+  if (mode === 'stream') {
+    if (!status?.moonlight?.up) {
+      return stageMessage(`<h2>Stream server is not running</h2>
+        <p>moonlight-web should be listening on 127.0.0.1:${status?.moonlight?.port ?? 8791}.</p>
+        <p><code>systemctl --user status herdr-term-stream</code></p>`);
+    }
+    if (!status?.sunshine) {
+      return stageMessage(`<h2>Sunshine is not installed</h2>
+        <p>moonlight-web streams from a Sunshine host, and nothing is listening on
+           port 47989. Installing it needs a password, so it has to be run by hand:</p>
+        <p><code>yay -S sunshine-bin &amp;&amp; sudo systemctl enable --now sunshine</code></p>
+        <p>Until then, <b>Screen</b> mode below gives a live picture, and every
+           shortcut on this page already works.</p>`);
+    }
+    $('stage').classList.remove('touch');
+    $('stage').innerHTML = `<iframe src="${status.moonlight.prefix}/"
+      allow="fullscreen; gamepad; autoplay; clipboard-read; clipboard-write"></iframe>`;
+    return;
+  }
+
+  $('stage').innerHTML = '<img id="shot" alt="screen"><div id="ping"></div>';
+  $('stage').classList.add('touch');
+  bindTouch($('shot'));
+  grab();
+}
+
+// Map a tap to a fraction of the captured screen. object-fit:contain letterboxes
+// the frame inside the element, so the drawn rectangle -- not the element box --
+// is what the fraction is relative to; a tap on a letterbox bar means nothing
+// and is dropped.
+function framePoint(img, clientX, clientY) {
+  const box = img.getBoundingClientRect();
+  const nw = img.naturalWidth, nh = img.naturalHeight;
+  if (!nw || !nh || !box.width || !box.height) return null;
+  const scale = Math.min(box.width / nw, box.height / nh);
+  const w = nw * scale, h = nh * scale;
+  const nx = (clientX - box.left - (box.width - w) / 2) / w;
+  const ny = (clientY - box.top - (box.height - h) / 2) / h;
+  if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return null;
+  return { nx, ny };
+}
+
+const HOLD_MS = 500, SLOP = 12;
+
+function bindTouch(img) {
+  let start = null, held = false, holdTimer = null;
+
+  const ping = (x, y) => {
+    const el = $('ping'), box = $('stage').getBoundingClientRect();
+    if (!el) return;
+    el.style.left = `${x - box.left}px`;
+    el.style.top = `${y - box.top}px`;
+    el.classList.remove('on');
+    void el.offsetWidth; // restart the transition
+    el.classList.add('on');
+    setTimeout(() => el.classList.remove('on'), 30);
+  };
+
+  const fire = (pt, button, count) => {
+    setState(button === 'right' ? 'right-click' : 'click');
+    api('/api/desktop/pointer', { ...pt, click: true, button, count })
+      .then(() => setTimeout(grab, 250))
+      .catch(err => setState(err.message, true));
+  };
+
+  img.addEventListener('pointerdown', ev => {
+    const pt = framePoint(img, ev.clientX, ev.clientY);
+    if (!pt) return;
+    ev.preventDefault();
+    start = { pt, x: ev.clientX, y: ev.clientY, at: Date.now() };
+    held = false;
+    // A long press is the only gesture a touchscreen has spare for the right
+    // button, so it fires on its own rather than waiting for the finger to lift.
+    holdTimer = setTimeout(() => {
+      if (!start) return;
+      held = true;
+      ping(start.x, start.y);
+      fire(start.pt, 'right', 1);
+    }, HOLD_MS);
+  });
+
+  const cancel = () => { clearTimeout(holdTimer); start = null; };
+  img.addEventListener('pointercancel', cancel);
+  img.addEventListener('pointerleave', cancel);
+
+  img.addEventListener('pointerup', ev => {
+    clearTimeout(holdTimer);
+    if (!start) return;
+    const s = start; start = null;
+    if (held) return;
+    // A drag is a scroll, not a click: too easy to fire one by accident while
+    // panning, and scrolling is otherwise unreachable by touch.
+    const dx = ev.clientX - s.x, dy = ev.clientY - s.y;
+    if (Math.abs(dx) > SLOP || Math.abs(dy) > SLOP) {
+      const steps = Math.max(-6, Math.min(6, Math.round(dy / 40)));
+      if (steps) {
+        api('/api/desktop/pointer', { ...s.pt, scroll: steps })
+          .then(() => setTimeout(grab, 250))
+          .catch(err => setState(err.message, true));
+      }
+      return;
+    }
+    ping(ev.clientX, ev.clientY);
+    fire(s.pt, 'left', ev.detail >= 2 ? 2 : 1);
+  });
+
+  img.addEventListener('contextmenu', ev => ev.preventDefault());
+}
+
+// Swap in a fully-decoded frame so the view never flashes empty mid-load.
+function grab() {
+  if (mode !== 'screen') return;
+  clearTimeout(timer);
+  const next = new Image();
+  next.onload = () => {
+    const el = $('shot');
+    if (el && mode === 'screen') el.src = next.src;
+    if (live) timer = setTimeout(grab, 1000);
+  };
+  next.onerror = () => {
+    setState('screen grab failed', true);
+    if (live) timer = setTimeout(grab, 3000);
+  };
+  next.src = `/api/desktop/screen.jpg?scale=0.5&quality=55&t=${Date.now()}`;
+}
+
+$('m-stream').onclick = () => setMode('stream');
+$('m-screen').onclick = () => setMode('screen');
+$('refresh').onclick = () => (mode === 'screen' ? grab() : render());
+$('live').onclick = () => {
+  live = !live;
+  $('live').setAttribute('aria-pressed', String(live));
+  $('live').textContent = live ? 'Live' : 'Paused';
+  if (live) grab(); else clearTimeout(timer);
+};
+
+async function refreshStatus() {
+  try {
+    status = await api('/api/desktop/status');
+    const mon = status.monitors[0];
+    setState(status.session
+      ? `${mon ? `${mon.width}×${mon.height}` : 'session'} · stream ${status.sunshine ? 'ready' : 'off'}`
+      : 'no desktop session', !status.session);
+  } catch (err) {
+    setState(err.message, true);
+  }
+}
+
+(async () => {
+  await refreshStatus();
+  await loadShortcuts().catch(err => setState(err.message, true));
+  // Without Sunshine the stream can't come up, so open on the view that works.
+  setMode(status?.sunshine && status?.moonlight?.up ? 'stream' : 'screen');
+})();
+</script>
+</body>
+</html>

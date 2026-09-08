@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>herdr sessions</title>
+<link rel="stylesheet" href="/app.css">
+<style>
+  main { padding:18px 20px 40px; max-width:1100px; margin:0 auto; }
+
+  .newbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+            background:var(--panel); border:1px solid var(--line);
+            border-radius:10px; padding:12px; margin-bottom:20px; }
+  .newbar input { flex:1; min-width:170px; font-family:ui-monospace, monospace; }
+
+  ul { list-style:none; margin:0; padding:0; display:grid; gap:10px; }
+  li.card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+            padding:13px 15px; display:flex; align-items:center; gap:14px; }
+  .dot { width:9px; height:9px; border-radius:50%; flex:none; background:var(--unknown); }
+  .dot.working { background:var(--working); animation:pulse 1.4s ease-in-out infinite; }
+  .dot.blocked { background:var(--blocked); }
+  .dot.idle    { background:var(--idle); }
+  .dot.done    { background:var(--done); }
+  .dot.starting{ background:var(--accent); animation:pulse 1s linear infinite; }
+  @keyframes pulse { 50% { opacity:.25; } }
+
+  .meta { min-width:0; flex:1; }
+  .name { font-weight:600; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .kind { font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+          background:#222836; border:1px solid var(--line); color:var(--dim);
+          padding:2px 7px; border-radius:99px; }
+  .sub { color:var(--dim); font-size:12px; font-family:ui-monospace, monospace;
+         white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:3px; }
+  .status { font-size:12px; color:var(--dim); min-width:64px; text-align:right; }
+  .actions { display:flex; gap:7px; flex:none; }
+
+  .empty { color:var(--dim); text-align:center; padding:46px 20px;
+           border:1px dashed var(--line); border-radius:10px; }
+  @media (max-width:620px) {
+    main { padding:14px 12px 40px; }
+    li.card { flex-wrap:wrap; }
+    .status { text-align:left; min-width:0; }
+    .actions { width:100%; }
+    .actions a, .actions button { flex:1; text-align:center; }
+  }
+</style>
+</head>
+<body>
+  <header class="app">
+    <h1>Herdr</h1>
+    <nav class="tabs">
+      <a href="/" aria-current="page">Sessions</a>
+      <a href="/files.html">Files</a>
+      <a href="/desktop.html">Desktop</a>
+    </nav>
+    <span class="spacer"></span>
+    <span class="count dim" id="count" style="font-size:12px"></span>
+    <span class="state" id="conn">connecting…</span>
+  </header>
+
+  <main>
+    <div class='banner err' id='err'></div>
+
+    <form class="newbar" id="newform">
+      <select id="kind"></select>
+      <input id="cwd" placeholder="working directory (default: home)" autocomplete="off">
+      <input id="name" placeholder="name (optional)" autocomplete="off" style="max-width:190px">
+      <button type='submit' class='primary' id='startbtn'>Start session</button>
+    </form>
+
+    <ul id="list"></ul>
+  </main>
+
+<script>
+const listEl = document.getElementById('list');
+const connEl = document.getElementById('conn');
+const errEl = document.getElementById('err');
+const countEl = document.getElementById('count');
+const kindEl = document.getElementById('kind');
+const startBtn = document.getElementById('startbtn');
+let ws, starting = false;
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+
+function showError(msg) {
+  errEl.textContent = msg;
+  errEl.style.display = msg ? 'block' : 'none';
+}
+
+function connect() {
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  ws.onopen = () => {
+    connEl.textContent = 'live';
+    connEl.className = 'state';
+    ws.send(JSON.stringify({ type: 'sessions:watch' }));
+  };
+  ws.onclose = () => {
+    connEl.textContent = 'reconnecting…';
+    connEl.className = 'state bad';
+    setTimeout(connect, 1500);
+  };
+  ws.onmessage = ev => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'sessions') render(msg.sessions);
+    else if (msg.type === 'kinds') fillKinds(msg.kinds);
+    else if (msg.type === 'session:started') { setStarting(false); showError(''); }
+    else if (msg.type === 'error') { setStarting(false); showError(msg.message); }
+  };
+}
+
+function fillKinds(kinds) {
+  if (kindEl.options.length) return;
+  for (const k of kinds) {
+    const opt = document.createElement('option');
+    opt.value = k;
+    opt.textContent = k === 'shell' ? 'shell (no agent)' : k;
+    if (k === 'claude') opt.selected = true;
+    kindEl.appendChild(opt);
+  }
+}
+
+function setStarting(on) {
+  starting = on;
+  startBtn.disabled = on;
+  startBtn.textContent = on ? 'Starting…' : 'Start session';
+}
+
+function render(sessions) {
+  countEl.textContent = sessions.length
+    ? `${sessions.length} session${sessions.length === 1 ? '' : 's'}`
+    : '';
+  if (!sessions.length) {
+    listEl.innerHTML = '<li class="empty">No sessions yet. Start one above.</li>';
+    return;
+  }
+  listEl.innerHTML = sessions.map(s => {
+    const label = s.name || s.label || s.paneId;
+    const kind = s.isAgent ? `<span class="kind">${esc(s.kind || 'agent')}</span>` : '<span class="kind">shell</span>';
+    return `<li class="card">
+      <span class="dot ${esc(s.status)}" title="${esc(s.status)}"></span>
+      <span class="meta">
+        <span class="name">${esc(label)} ${kind}</span>
+        <span class="sub">${esc(s.cwd)} · ${esc(s.paneId)}</span>
+      </span>
+      <span class="status">${esc(s.status)}</span>
+      <span class="actions">
+        <a class='btn primary' href="/terminal.html?pane=${encodeURIComponent(s.paneId)}">Open</a>
+        <button class="danger" data-close="${esc(s.workspaceId)}" data-label="${esc(label)}">Close</button>
+      </span>
+    </li>`;
+  }).join('');
+
+  for (const btn of listEl.querySelectorAll('button[data-close]')) {
+    btn.onclick = () => {
+      // Closing kills the pane and any agent in it, so make it deliberate.
+      if (!confirm(`Close "${btn.dataset.label}"? This ends the session and any agent running in it.`)) return;
+      btn.disabled = true;
+      btn.textContent = 'Closing…';
+      ws.send(JSON.stringify({ type: 'sessions:close', workspaceId: btn.dataset.close }));
+    };
+  }
+}
+
+document.getElementById('newform').onsubmit = e => {
+  e.preventDefault();
+  if (starting || ws?.readyState !== 1) return;
+  showError('');
+  setStarting(true);
+  ws.send(JSON.stringify({
+    type: 'sessions:start',
+    kind: kindEl.value,
+    cwd: document.getElementById('cwd').value.trim() || undefined,
+    name: document.getElementById('name').value.trim() || undefined,
+  }));
+  document.getElementById('name').value = '';
+  // The server answers with session:started or error; clear the stuck state if
+  // neither arrives.
+  setTimeout(() => setStarting(false), 65000);
+};
+
+connect();
+</script>
+</body>
+</html>

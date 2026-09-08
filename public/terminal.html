@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>herdr-term</title>
+<!-- xterm is vendored under public/vendor rather than pulled from a CDN: the
+     path this used to load started returning 404, which left the page a dead
+     black rectangle with "Terminal is not defined". A tool that only ever serves
+     itself over a private tunnel should not need the public internet. -->
+<link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/app.css">
+<script src="/viewport.js"></script>
+<style>
+  :root { --bg:#0f1115; --panel:#161923; --line:#262b38; --fg:#c9d1d9; --dim:#7d8694; --accent:#4c9aff; }
+  * { box-sizing: border-box; }
+  /* min-height:0 defeats app.css's min-height:100dvh, which would otherwise
+     override this height and keep the page full-size under the keyboard. */
+  body { margin:0; height:100dvh; height:var(--vh, 100dvh); min-height:0;
+         display:flex; background:var(--bg); color:var(--fg);
+         font:13px ui-sans-serif, system-ui, sans-serif; overflow:hidden; }
+  #sidebar { width:230px; flex:none; background:var(--panel); border-right:1px solid var(--line);
+             display:flex; flex-direction:column; }
+  #sidebar h1 { margin:0; padding:14px 14px 10px; font-size:13px; letter-spacing:.08em;
+                text-transform:uppercase; color:var(--dim); }
+  #panes { list-style:none; margin:0; padding:0 8px; overflow-y:auto; flex:1; }
+  #panes li { padding:8px 10px; border-radius:6px; cursor:pointer; margin-bottom:2px; line-height:1.35; }
+  #panes li:hover { background:#1e2330; }
+  #panes li.active { background:var(--accent); color:#fff; }
+  #panes .id { font-family:ui-monospace, monospace; font-size:11px; opacity:.75; }
+  #panes .title { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #status { padding:9px 14px; border-top:1px solid var(--line); color:var(--dim); font-size:11px; }
+  #main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  /* The host pty is a fixed 174x49 grid and the font floor is 6px, so on a
+     phone the terminal is wider than the screen no matter what fit() picks.
+     Let it pan rather than clipping the right-hand third away. */
+  #term { flex:1; min-height:0; padding:6px; overflow:auto;
+          -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+  #bar { display:flex; gap:8px; padding:8px; border-top:1px solid var(--line);
+         background:var(--panel); flex:none;
+         padding-bottom:max(8px, env(safe-area-inset-bottom)); }
+  #bar input { flex:1; background:#0c0e13; border:1px solid var(--line); color:var(--fg);
+               border-radius:6px; padding:9px 11px; font:13px ui-monospace, monospace; }
+  #bar button { background:var(--accent); color:#fff; border:0; border-radius:6px;
+                padding:0 15px; font-weight:600; cursor:pointer; }
+  .keys { display:flex; gap:6px; padding:0 8px 8px; background:var(--panel);
+          flex-wrap:wrap; flex:none; }
+  .keys button { background:#222836; color:var(--fg); border:1px solid var(--line);
+                 border-radius:6px; padding:7px 11px; cursor:pointer; font-size:12px; }
+  #topnav { display:flex; align-items:center; gap:8px; padding:6px 8px;
+             background:var(--panel); border-bottom:1px solid var(--line); flex:none; }
+  #topnav button { padding:5px 10px; }
+  #panestoggle { display:none; }
+  @media (max-width:760px) {
+    #sidebar { display:none; }
+    #sidebar.open { display:flex; position:absolute; inset:0 auto 0 0; z-index:9; }
+    #panestoggle { display:inline-block; }
+  }
+</style>
+</head>
+<body>
+  <aside id="sidebar">
+    <h1><a href="/" style="color:inherit;text-decoration:none">&larr; Sessions</a></h1>
+    <ul id="panes"></ul>
+    <div id="status">connecting…</div>
+  </aside>
+  <main id="main">
+    <div id="topnav">
+      <button id="panestoggle" title="Show panes">☰</button>
+      <nav class="tabs">
+        <a href="/">Sessions</a>
+        <a href="/files.html">Files</a>
+        <a href="/desktop.html">Desktop</a>
+      </nav>
+    </div>
+    <div id="term"></div>
+    <div class="keys">
+      <button data-key="Escape">Esc</button>
+      <button data-key="Tab">Tab</button>
+      <button data-key="Up">↑</button>
+      <button data-key="Down">↓</button>
+      <button data-key="Left">←</button>
+      <button data-key="Right">→</button>
+      <button data-key="C-c">Ctrl-C</button>
+      <button data-key="Enter">Enter</button>
+    </div>
+    <form id="bar">
+      <input id="line" placeholder="Type a command, press Enter to send…" autocomplete="off">
+      <button type="submit">Send</button>
+    </form>
+  </main>
+
+<script src="/vendor/xterm.js"></script>
+<script>
+const term = new Terminal({
+  convertEol: true,
+  cursorBlink: false,
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  fontSize: 13,
+  theme: { background: '#0f1115', foreground: '#c9d1d9' },
+});
+term.open(document.getElementById('term'));
+
+const statusEl = document.getElementById('status');
+const listEl = document.getElementById('panes');
+let ws, active = null, grid = { cols: 0, rows: 0 };
+
+function fit(cols, rows) {
+  if (cols === grid.cols && rows === grid.rows) return;
+  grid = { cols, rows };
+  term.resize(cols, rows);
+  // Scale the font so the host's fixed grid fills the viewport.
+  const box = document.getElementById('term').getBoundingClientRect();
+  const size = Math.max(6, Math.min(
+    Math.floor((box.width - 12) / cols / 0.6),
+    Math.floor((box.height - 12) / rows / 1.2),
+  ));
+  term.options.fontSize = size;
+}
+
+function connect() {
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  ws.onopen = () => { statusEl.textContent = 'connected'; };
+  ws.onclose = () => { statusEl.textContent = 'disconnected — retrying'; setTimeout(connect, 1500); };
+  ws.onmessage = ev => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'panes') renderPanes(msg.panes);
+    else if (msg.type === 'frame') {
+      fit(msg.cols, msg.rows);
+      term.write('\x1b[H\x1b[2J' + msg.text);
+    } else if (msg.type === 'error') statusEl.textContent = msg.message;
+  };
+}
+
+// ?pane=<id> selects which pane to open; falls back to the first one.
+const wantedPane = new URLSearchParams(location.search).get('pane');
+
+function renderPanes(panes) {
+  listEl.innerHTML = '';
+  if (!active && panes.length) {
+    const preferred = panes.find(p => p.pane_id === wantedPane);
+    attach((preferred ?? panes[0]).pane_id);
+  }
+  for (const p of panes) {
+    const li = document.createElement('li');
+    li.className = p.pane_id === active ? 'active' : '';
+    li.innerHTML = `<span class="title">${escapeHtml(p.terminal_title_stripped || p.cwd || '')}</span>
+                    <span class="id">${escapeHtml(p.pane_id)}</span>`;
+    li.onclick = () => attach(p.pane_id);
+    listEl.appendChild(li);
+  }
+  statusEl.textContent = `${panes.length} pane${panes.length === 1 ? '' : 's'}`;
+}
+
+const escapeHtml = s => String(s).replace(/[&<>"]/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function attach(paneId) {
+  active = paneId;
+  ws.send(JSON.stringify({ type: 'attach', paneId }));
+  ws.send(JSON.stringify({ type: 'panes' }));
+}
+
+const send = obj => ws?.readyState === 1 && ws.send(JSON.stringify(obj));
+
+document.getElementById('bar').onsubmit = e => {
+  e.preventDefault();
+  const input = document.getElementById('line');
+  send({ type: 'input', text: input.value + '\n' });
+  input.value = '';
+};
+
+for (const btn of document.querySelectorAll('.keys button')) {
+  btn.onclick = () => send({ type: 'keys', keys: [btn.dataset.key] });
+}
+
+// Direct typing into the terminal surface.
+term.onData(data => send({ type: 'input', text: data }));
+window.addEventListener('resize', () => fit(grid.cols || 80, grid.rows || 24));
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+/* Shared shell for every herdr-term page: tokens, header, tab nav, buttons. */
+:root {
+  --bg:#0f1115; --panel:#161923; --sunk:#0c0e13; --line:#262b38;
+  --fg:#c9d1d9; --dim:#7d8694; --accent:#4c9aff;
+  --working:#e3b341; --blocked:#f85149; --idle:#3fb950;
+  --done:#a371f7; --unknown:#6e7681;
+}
+* { box-sizing:border-box; }
+body { margin:0; min-height:100dvh; background:var(--bg); color:var(--fg);
+       font:14px ui-sans-serif, system-ui, sans-serif; }
+/* The min-height above is why the full-height pages (terminal, desktop) reset
+   it to 0: they size themselves from --vh, the visible height reported by
+   visualViewport (see viewport.js), and min-height wins over height -- so a
+   min-height of 100dvh would pin them open at full height exactly when the
+   phone keyboard shrinks the viewport, which is the case --vh exists for. */
+
+header.app { display:flex; align-items:center; gap:14px; padding:12px 18px;
+             border-bottom:1px solid var(--line); background:var(--panel);
+             position:sticky; top:0; z-index:20; flex-wrap:wrap; }
+header.app h1 { margin:0; font-size:15px; font-weight:650; white-space:nowrap; }
+header.app .spacer { flex:1; }
+header.app .state { font-size:12px; color:var(--dim); white-space:nowrap; }
+header.app .state.bad { color:var(--blocked); }
+
+nav.tabs { display:flex; gap:4px; }
+nav.tabs a { color:var(--dim); text-decoration:none; font-size:13px; font-weight:550;
+             padding:6px 12px; border-radius:7px; border:1px solid transparent; }
+nav.tabs a:hover { background:#1e2330; color:var(--fg); }
+nav.tabs a[aria-current="page"] { background:#222836; border-color:var(--line); color:var(--fg); }
+
+button, .btn { border:1px solid var(--line); background:#222836; color:var(--fg);
+               border-radius:7px; padding:7px 12px; font:inherit; font-size:13px;
+               cursor:pointer; text-decoration:none; display:inline-block; }
+button:hover, .btn:hover { border-color:#39415a; }
+button:disabled { opacity:.5; cursor:default; }
+button.primary, .btn.primary { background:var(--accent); border-color:var(--accent);
+                               color:#fff; font-weight:600; }
+button.danger:hover { border-color:var(--blocked); color:var(--blocked); }
+
+input, select { background:var(--sunk); border:1px solid var(--line); color:var(--fg);
+                border-radius:7px; padding:8px 11px; font:inherit; font-size:13px; }
+
+.banner { border-radius:8px; padding:10px 13px; margin-bottom:14px; font-size:13px; }
+.banner.err { display:none; background:#2d1618; border:1px solid var(--blocked); color:#ffb4ac; }
+.banner.info { background:#151d2b; border:1px solid #2b3b57; color:#a9c3e8; }
+.banner code { font-family:ui-monospace, monospace; background:#0b1220;
+               border:1px solid #24314a; border-radius:4px; padding:1px 5px;
+               display:inline-block; overflow-wrap:anywhere; }
+
+.mono { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+.dim { color:var(--dim); }
+
+@media (max-width:600px) {
+  header.app { padding:10px 12px; gap:8px; }
+  header.app h1 { font-size:14px; }
+  nav.tabs a { padding:6px 10px; }
+}
