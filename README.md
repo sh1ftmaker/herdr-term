@@ -157,9 +157,26 @@ systemctl --user enable --now app-dev.lizardbyte.app.Sunshine.service
 > `sunshine.service` alias only exists once the unit is enabled, so the obvious command fails with
 > `Unit sunshine.service does not exist` *after* the package has installed perfectly well.
 
-Then set a username and password in Sunshine's own UI on `https://localhost:47990`, and in the
-Desktop tab's Stream view add a host at `localhost` with an empty port and click it to pair,
-entering the PIN back in that UI.
+Claim the admin account before anything else — Sunshine binds `0.0.0.0`, so until credentials
+exist, anyone on the same network can open `/welcome` and claim it, and that UI can define apps
+that run shell commands. Set `origin_web_ui_allowed = pc` in `sunshine.conf` to confine the UI to
+localhost.
+
+```bash
+sunshine --creds <username> <password>     # NOT with sudo
+systemctl --user restart app-dev.lizardbyte.app.Sunshine
+curl -sk -o /dev/null -w '%{http_code}\n' https://localhost:47990/   # 401 = set, 307 = not set
+```
+
+> **`--creds` has three traps.** It writes to `$HOME/.config/sunshine/sunshine_state.json` of
+> *whoever runs it*, so under `sudo` it silently configures root instead — and still prints "New
+> credentials have been created" and exits `0`. Passing a config file path does **not** redirect it;
+> that path is ignored for credentials and the file it writes stays empty. And the running service
+> only reads that state at startup, so it needs a restart. The only reliable check is the status
+> code above.
+
+Then pair: in the Desktop tab's Stream view add a host at `localhost` with an empty port, click it
+to pair, and enter the PIN in Sunshine's UI on `https://localhost:47990`.
 
 Sunshine's udev rule re-tags `/dev/uinput` with `TAG+="uaccess"`, which grants the seat owner the
 same ACL the virtual pointer above relies on — the two do not conflict.
@@ -208,6 +225,16 @@ Two things Access does **not** protect against, handled in `server/index.mjs`:
   *and* rejects a foreign `Origin` — otherwise merely having a valid Access session in the browser
   would be enough for another site to drive the desktop.
 - **Cross-site WebSockets**, which aren't subject to CORS at all. `/ws` applies the same origin check.
+
+The moonlight proxy trusts `Cf-Access-Authenticated-User-Email` and maps it onto `X-Forwarded-User`,
+which is what removes the second login: an Access-authenticated visitor is auto-logged-in to
+moonlight-web under their own email. Verified end to end — with no header the API returns `401`, a
+client-supplied `X-Forwarded-User` is stripped and still returns `401`, and a spoof presented
+alongside a real Access header resolves to the Access identity, not the spoof. **That trust is only
+sound while Cloudflare is the one setting the header**; if `127.0.0.1:8790` is ever exposed
+directly, any client could name itself. It is already the case that a local process needs no
+credentials at all here, so this widens nothing on a single-user machine — but it is why the origin
+must stay on loopback.
 
 The bridge also has a shared-secret gate of its own, in `server/auth.mjs`. It is redundant behind
 Access and can be switched off with `HERDR_TERM_NO_AUTH=1` in `.env`. **If you are not putting an
