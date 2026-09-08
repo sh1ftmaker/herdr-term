@@ -175,8 +175,16 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://localhost:47990/   # 401 = set
 > only reads that state at startup, so it needs a restart. The only reliable check is the status
 > code above.
 
-Then pair: in the Desktop tab's Stream view add a host at `localhost` with an empty port, click it
-to pair, and enter the PIN in Sunshine's UI on `https://localhost:47990`.
+Then pair: in the Desktop tab's Stream view add a host at **`127.0.0.1`** with an empty port, click
+it to pair, and enter the PIN in Sunshine's UI on `https://localhost:47990`.
+
+> **Add the host as `127.0.0.1`, not `localhost`.** Sunshine binds IPv4 only (`0.0.0.0:47989`), but
+> `localhost` resolves to `::1` first. The initial host probe survives the fallback to IPv4, so the
+> host appears online and looks fine — but the multi-request pairing handshake does not, and fails
+> with `hyper::Error(IncompleteMessage)` in the moonlight-web log and a bare `PairError` in the UI.
+> Sunshine logs nothing at all and still answers the PIN form with `{"status":true}`, so it looks
+> like a rejected or mistyped PIN when it is neither. Re-adding the host by IPv4 literal pairs
+> first try.
 
 Sunshine's udev rule re-tags `/dev/uinput` with `TAG+="uaccess"`, which grants the seat owner the
 same ACL the virtual pointer above relies on — the two do not conflict.
