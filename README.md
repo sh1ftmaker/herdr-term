@@ -148,11 +148,21 @@ The Stream view needs a Sunshine host on port 47989. Until one is running, the D
 and opens in Screen mode instead:
 
 ```bash
-yay -S sunshine-bin && sudo systemctl enable --now sunshine
+yay -S sunshine-bin
+systemctl --user enable --now app-dev.lizardbyte.app.Sunshine.service
 ```
 
-Then in the Desktop tab's Stream view: add a host at `localhost` with an empty port, click it to
-pair, and enter the PIN in Sunshine's own UI on `https://localhost:47990`.
+> **Not `sudo systemctl enable --now sunshine`.** Sunshine ships a *user* unit — it needs your
+> Wayland session — and the file is named `app-dev.lizardbyte.app.Sunshine.service`. The
+> `sunshine.service` alias only exists once the unit is enabled, so the obvious command fails with
+> `Unit sunshine.service does not exist` *after* the package has installed perfectly well.
+
+Then set a username and password in Sunshine's own UI on `https://localhost:47990`, and in the
+Desktop tab's Stream view add a host at `localhost` with an empty port and click it to pair,
+entering the PIN back in that UI.
+
+Sunshine's udev rule re-tags `/dev/uinput` with `TAG+="uaccess"`, which grants the seat owner the
+same ACL the virtual pointer above relies on — the two do not conflict.
 
 ## Known limitations
 
