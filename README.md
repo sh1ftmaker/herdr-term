@@ -1,7 +1,7 @@
 # herdr-term
 
-A small browser front-end for [Herdr](https://github.com/herdrdev/herdr) and the machine around
-it, served at `https://terminal.example.com`.
+A small browser front-end for [Herdr](https://github.com/herdrdev/herdr) and the Omarchy/Hyprland
+machine around it, served from your own hostname over a Cloudflare Tunnel.
 
 Inspired by [kcosr/herdr-web](https://github.com/kcosr/herdr-web), but built against Herdr's
 **JSON API only** — no Rust, no bincode, and no Herdr upgrade required.
@@ -9,9 +9,9 @@ Inspired by [kcosr/herdr-web](https://github.com/kcosr/herdr-web), but built aga
 ## Why not herdr-web directly
 
 herdr-web's bridge attaches over Herdr's *client* socket, a bincode-framed binary protocol. Every
-prebuilt herdr-web release needs Herdr `v0.9.0` / terminal protocol `22`; the `omarchy` package here
-is pinned at `0.8.2` / protocol `20`. The only matching branch ships no binary, so it would need a
-Rust toolchain to build.
+prebuilt herdr-web release needs Herdr `v0.9.0` / terminal protocol `22`, while Omarchy's packaged
+Herdr is `0.8.2` / protocol `20`. The only matching branch ships no binary, so it would need a Rust
+toolchain to build.
 
 Herdr's *API* socket is much friendlier: newline-delimited JSON over a unix socket, stable across
 both protocol versions. It exposes everything an interactive web terminal needs, so this project
@@ -57,7 +57,7 @@ Herdr API calls used:
 | `pane.read` (`source: visible`, `format: ansi`) | screen contents, ANSI colour preserved |
 | `pane.send_text` / `pane.send_keys` | keyboard input |
 | `events.subscribe` | live push on `pane.updated`, so redraws aren't purely polled |
-| `server.agent_manifests` | which agent kinds this Herdr can launch (21 here) |
+| `server.agent_manifests` | which agent kinds this Herdr can launch |
 | `workspace.create` + `agent.start` | create a session and adopt an agent into its pane |
 | `agent.list` | per-agent status for the dashboard |
 | `agent.prompt` | send a prompt without opening the terminal |
@@ -102,8 +102,8 @@ Three separate mechanisms, because they fail independently:
 so a shortcut is a snippet like `hl.dsp.window.close()` or `hl.dsp.exec_cmd("omarchy-menu toggle")`.
 The browser sends only an **id**; every snippet is a server-side constant in `server/desktop.mjs`.
 Entries whose helper binary is missing are dropped from the list rather than offered as dead
-buttons. 45 are exposed, grouped Menus / Apps / Window / Workspace / System — the Omarchy defaults
-worth having on a phone. There are deliberately no shutdown or reboot buttons.
+buttons. They are grouped Menus / Apps / Window / Workspace / System — the Omarchy defaults worth
+having on a phone. There are deliberately no shutdown or reboot buttons.
 
 **Keyboard.** `wtype` types into whatever currently has focus — `/api/desktop/type` for text and
 `/api/desktop/key` for a keysym plus modifiers, both against allowlists.
@@ -144,7 +144,8 @@ by `herdr-term-stream.service`. Its config sets three things that matter:
 > Sockets** in the stream settings, or in the role defaults in its Admin UI. HTTPS via the tunnel
 > gives the secure context that the WebSocket transport's `VideoDecoder` needs.
 
-**Sunshine is not installed** — it needs a password, so it can't be done from here:
+The Stream view needs a Sunshine host on port 47989. Until one is running, the Desktop tab says so
+and opens in Screen mode instead:
 
 ```bash
 yay -S sunshine-bin && sudo systemctl enable --now sunshine
@@ -184,9 +185,9 @@ pair, and enter the PIN in Sunshine's own UI on `https://localhost:47990`.
 
 ## Auth
 
-Access control lives in **Cloudflare Access**, which fronts `terminal.example.com` with an email
-allowlist. Unauthenticated requests are redirected to `selstech-prime.cloudflareaccess.com` and
-never reach the origin — verified across `/`, `/files.html`, `/desktop.html`, `/moonlight/`,
+Access control is expected to live in **Cloudflare Access**, fronting the hostname with an email
+allowlist. Unauthenticated requests are redirected to your team's `*.cloudflareaccess.com` login and
+never reach the origin. Check that this covers `/`, `/files.html`, `/desktop.html`, `/moonlight/`,
 `/api/fs/*`, `/api/desktop/*`, `/healthz`, and `/ws`. Covering `/ws` matters most: that WebSocket is
 the channel that actually carries keystrokes into the shell.
 
@@ -198,11 +199,11 @@ Two things Access does **not** protect against, handled in `server/index.mjs`:
   would be enough for another site to drive the desktop.
 - **Cross-site WebSockets**, which aren't subject to CORS at all. `/ws` applies the same origin check.
 
-The bridge's own shared-secret gate is redundant and **disabled** (`HERDR_TERM_NO_AUTH=1` in
-`.env`). The code remains in `server/auth.mjs`; to re-enable it — say the Access policy is ever
-removed — drop the `HERDR_TERM_NO_AUTH` line and set `HERDR_TERM_TOKEN`:
+The bridge also has a shared-secret gate of its own, in `server/auth.mjs`. It is redundant behind
+Access and can be switched off with `HERDR_TERM_NO_AUTH=1` in `.env`. **If you are not putting an
+edge policy in front of this, leave the gate on** and set `HERDR_TERM_TOKEN`:
 
-- First visit becomes `https://terminal.example.com/?t=<token>`; the server redirects to `/` and sets an
+- First visit becomes `https://<your-host>/?t=<token>`; the server redirects to `/` and sets an
   `HttpOnly` cookie so the token leaves the URL, history, and referrers.
 - Unauthenticated HTTP then gets `401`, and WebSocket upgrades are refused before the socket opens.
 
@@ -213,6 +214,29 @@ That is the intended trade on a single-user machine, but it does mean local acce
 drive the machine. Neither widens the blast radius — the terminal already gives an unrestricted
 shell as this user — but both make it reachable with fewer steps, so the Access email allowlist is
 the only thing standing in front of them. Narrow `HERDR_TERM_FS_ROOT` if that isn't wanted.
+
+## Setup
+
+Assumes an Omarchy / Hyprland machine with Herdr installed, plus `grim` and `wtype` (both are
+already there on Omarchy). `cloudflared` is only needed if you want it reachable from outside.
+
+```bash
+git clone https://github.com/sh1ftmaker/herdr-term ~/herdr-term
+cd ~/herdr-term
+npm install
+
+cp .env.example .env && chmod 600 .env          # then edit it
+cp cloudflared/config.example.yml cloudflared/config.yml   # then edit it
+```
+
+Unit templates are in [`systemd/`](systemd/) — they use `%h` rather than a hard-coded home, but
+assume the clone is at `~/herdr-term`. See [`systemd/README.md`](systemd/README.md).
+
+To run it without systemd at all:
+
+```bash
+node server/index.mjs      # prints the URL with the token
+```
 
 ## Running
 
@@ -228,12 +252,13 @@ journalctl --user -u herdr-term -f
 |---|---|
 | `herdr-session.service` | headless Herdr session on a fixed-size pty |
 | `herdr-term.service` | the Node bridge on `127.0.0.1:8790` |
-| `herdr-term-tunnel.service` | `cloudflared` for `terminal.example.com` |
+| `herdr-term-tunnel.service` | `cloudflared` for your hostname |
 | `herdr-term-stream.service` | moonlight-web on `127.0.0.1:8791` |
 
-All four are enabled and start at boot. Lingering is on
-(`loginctl show-user zalo --property=Linger` → `yes`), so they come up **before anyone logs in**;
-the LUKS volume is TPM2-unlocked at boot, so `.env` and the tunnel credentials are readable by then.
+Enable them to start at boot, and turn on lingering (`loginctl enable-linger "$USER"`; check with
+`loginctl show-user "$USER" --property=Linger`) so they come up **before anyone logs in**. If the
+home directory is on an encrypted volume, it has to be unlocked at boot for `.env` and the tunnel
+credentials to be readable by then.
 
 The bridge therefore can't rely on its own environment to find the Wayland session — it may have
 started before one existed. `server/desktop.mjs` re-resolves `WAYLAND_DISPLAY` and
@@ -245,19 +270,18 @@ Hyprland restarting underneath it.
 > and `herdr-term-tunnel` start jobs — everything looks fine until a reboot brings up only the Herdr
 > session. Check with `systemd-analyze --user verify` after editing.
 
-Locally, without systemd:
-
-```bash
-npm install
-node server/index.mjs      # prints the URL with the token
-```
-
 ## Tunnel
 
-`cloudflared/config.yml` reuses the pre-existing **`terminal-new`** tunnel
-(`00000000-0000-0000-0000-000000000000`), which already owned the `terminal.example.com` DNS record —
-so no DNS record was created or overwritten. Before this, the hostname returned `530` because that
-tunnel had no connector running.
+Copy `cloudflared/config.example.yml` to `cloudflared/config.yml` and fill in your own tunnel id,
+credentials path, and hostname. The real `config.yml` is gitignored because it names one specific
+machine.
+
+```bash
+cloudflared tunnel create <name>
+cloudflared tunnel route dns <name> <hostname>
+```
+
+If the hostname returns `530`, the tunnel exists but has no connector running — start the unit.
 
 Everything is served from the single `127.0.0.1:8790` origin, including the proxied stream, so the
 tunnel config needs no ingress changes as pages are added.

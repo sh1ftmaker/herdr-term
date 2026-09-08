@@ -1,0 +1,17 @@
+[Unit]
+Description=herdr-term web bridge
+After=herdr-session.service
+Wants=herdr-session.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/herdr-term
+EnvironmentFile=%h/herdr-term/.env
+# Use an absolute path if node comes from a version manager (mise, nvm, asdf):
+# a user unit does not get a login shell's PATH.
+ExecStart=/usr/bin/env node server/index.mjs
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Headless Herdr session on a fixed-size pty
+# No After=default.target here: these units are WantedBy=default.target, so
+# ordering after it forms a cycle, and systemd resolves that cycle by silently
+# dropping the bridge and tunnel start jobs at boot.
+
+[Service]
+Type=simple
+Environment=HERDR_COLS=200
+Environment=HERDR_ROWS=50
+ExecStart=%h/herdr-term/scripts/herdr-session.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
